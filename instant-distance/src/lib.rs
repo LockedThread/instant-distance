@@ -25,6 +25,7 @@ pub struct Builder {
     ef_construction: usize,
     heuristic: Option<Heuristic>,
     ml: f32,
+    m: usize,
     seed: u64,
     #[cfg(feature = "indicatif")]
     progress: Option<ProgressBar>,
@@ -56,6 +57,16 @@ impl Builder {
     /// If the `mL` parameter is not already set, it defaults to `1.0 / ln(M)`.
     pub fn ml(mut self, ml: f32) -> Self {
         self.ml = ml;
+        self
+    }
+
+    /// Set the `M` parameter from the paper
+    ///
+    /// If the `M` parameter is not already set, it defaults to [DEFAULT_M].
+    /// Note side effect that if you set ml and then set M, M will recalculate ml according to M's value.
+    pub fn m(mut self, m: usize) -> Self {
+        self.m = m;
+        self.ml = 1.0 / (m as f32).ln();
         self
     }
 
@@ -104,7 +115,8 @@ impl Default for Builder {
             ef_search: 100,
             ef_construction: 100,
             heuristic: Some(Heuristic::default()),
-            ml: 1.0 / (M as f32).ln(),
+            ml: 1.0 / (DEFAULT_M as f32).ln(),
+            m: DEFAULT_M,
             seed: rand::random(),
             #[cfg(feature = "indicatif")]
             progress: None,
@@ -193,6 +205,7 @@ impl<'a, P, V> MapItem<'a, P, V> {
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
 pub struct Hnsw<P> {
     ef_search: usize,
+    m: usize,
     points: Vec<P>,
     zero: Vec<ZeroNode>,
     layers: Vec<Vec<UpperNode>>,
@@ -225,6 +238,7 @@ where
             return (
                 Self {
                     ef_search,
+                    m: builder.m,
                     zero: Vec::new(),
                     points: Vec::new(),
                     layers: Vec::new(),
@@ -239,7 +253,7 @@ where
         let mut num = points.len();
         loop {
             let next = (num as f32 * ml) as usize;
-            if next < M {
+            if next < builder.m {
                 break;
             }
             sizes.push((num - next, num));
@@ -307,7 +321,7 @@ where
                 bar.set_message(format!("Building index (layer {})", layer.0));
             }
 
-            let inserter = |pid| state.insert(pid, layer, &layers);
+            let inserter = |pid| state.insert(pid, layer, &layers, builder.m);
 
             let end = range.end;
             if layer == top {
@@ -336,6 +350,7 @@ where
         (
             Self {
                 ef_search,
+                m: builder.m,
                 zero: zero.into_iter().map(|node| node.into_inner()).collect(),
                 points,
                 layers,
@@ -364,8 +379,8 @@ where
         search.push(PointId(0), point, &self.points);
         for cur in LayerId(self.layers.len()).descend() {
             let (ef, num) = match cur.is_zero() {
-                true => (self.ef_search, M * 2),
-                false => (1, M),
+                true => (self.ef_search, self.m * 2),
+                false => (1, self.m),
             };
 
             search.ef = ef;
@@ -434,7 +449,7 @@ impl<'a, P: Point> Construction<'a, P> {
     ///
     /// Creates the new node, initializing its `nearest` array and updates the nearest neighbors
     /// for the new node's neighbors if necessary before appending the new node to the layer.
-    fn insert(&self, new: PointId, layer: LayerId, layers: &[Vec<UpperNode>]) {
+    fn insert(&self, new: PointId, layer: LayerId, layers: &[Vec<UpperNode>], m: usize) {
         let mut node = self.zero[new].write();
         let (mut search, mut insertion) = self.pool.pop();
         insertion.ef = self.ef_construction;
@@ -442,7 +457,7 @@ impl<'a, P: Point> Construction<'a, P> {
         let point = &self.points[new];
         search.reset();
         search.push(PointId(0), point, self.points);
-        let num = if layer.is_zero() { M * 2 } else { M };
+        let num = if layer.is_zero() { m * 2 } else { m };
 
         for cur in self.top.descend() {
             search.ef = if cur <= layer {
@@ -465,10 +480,10 @@ impl<'a, P: Point> Construction<'a, P> {
         let found = match self.heuristic {
             None => {
                 let candidates = search.select_simple();
-                &candidates[..Ord::min(candidates.len(), M * 2)]
+                &candidates[..Ord::min(candidates.len(), m * 2)]
             }
             Some(heuristic) => {
-                search.select_heuristic(&self.points[new], self.zero, self.points, heuristic)
+                search.select_heuristic(&self.points[new], self.zero, self.points, heuristic, m)
             }
         };
 
@@ -489,6 +504,7 @@ impl<'a, P: Point> Construction<'a, P> {
                     &self.points[pid],
                     self.points,
                     heuristic,
+                    m,
                 );
 
                 self.zero[pid]
@@ -613,6 +629,7 @@ impl Search {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn add_neighbor_heuristic<L: Layer, P: Point>(
         &mut self,
         new: PointId,
@@ -621,13 +638,14 @@ impl Search {
         point: &P,
         points: &[P],
         params: Heuristic,
+        m: usize,
     ) -> &[Candidate] {
         self.reset();
         self.push(new, point, points);
         for pid in current {
             self.push(pid, point, points);
         }
-        self.select_heuristic(point, layer, points, params)
+        self.select_heuristic(point, layer, points, params, m)
     }
 
     /// Heuristically sort and truncate neighbors in `self.nearest`
@@ -639,6 +657,7 @@ impl Search {
         layer: L,
         points: &[P],
         params: Heuristic,
+        m: usize,
     ) -> &[Candidate] {
         self.working.clear();
         // Get input candidates from `self.nearest` and store them in `self.working`.
@@ -666,7 +685,7 @@ impl Search {
         self.nearest.clear();
         self.discarded.clear();
         for candidate in self.working.drain(..) {
-            if self.nearest.len() >= M * 2 {
+            if self.nearest.len() >= m * 2 {
                 break;
             }
 
@@ -687,7 +706,7 @@ impl Search {
         if params.keep_pruned {
             // Add discarded connections from `working` (`Wd`) to `self.nearest` (`R`)
             for candidate in self.discarded.drain(..) {
-                if self.nearest.len() >= M * 2 {
+                if self.nearest.len() >= m * 2 {
                     break;
                 }
                 self.nearest.push(candidate);
@@ -782,6 +801,4 @@ pub trait Point: Clone + Sync {
 }
 
 /// The parameter `M` from the paper
-///
-/// This should become a generic argument to `Hnsw` when possible.
-const M: usize = 32;
+const DEFAULT_M: usize = 32;
