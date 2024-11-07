@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "serde-big-array")]
 use serde_big_array::BigArray;
 
-use crate::{Hnsw, Point, DEFAULT_M};
+use crate::{Hnsw, Point};
 
 pub(crate) struct Visited {
     store: Vec<u8>,
@@ -59,13 +59,13 @@ impl Visited {
 }
 
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct UpperNode([PointId; DEFAULT_M]);
+#[derive(Clone, Debug, Default)]
+pub(crate) struct UpperNode(Vec<PointId>);
 
 impl UpperNode {
-    pub(crate) fn from_zero(node: &ZeroNode) -> Self {
-        let mut nearest = [INVALID; DEFAULT_M];
-        nearest.copy_from_slice(&node.0[..DEFAULT_M]);
+    pub(crate) fn from_zero(node: &ZeroNode, m: usize) -> Self {
+        let mut nearest = Vec::with_capacity(m);
+        nearest.extend_from_slice(&node.0[..m]);
         Self(nearest)
     }
 }
@@ -79,12 +79,16 @@ impl<'a> Layer for &'a [UpperNode] {
 }
 
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct ZeroNode(
-    #[cfg_attr(feature = "serde", serde(with = "BigArray"))] pub(crate) [PointId; DEFAULT_M * 2],
-);
+#[derive(Clone, Debug)]
+// TODO: Fix BigArray usage
+pub(crate) struct ZeroNode(Vec<PointId>);
 
 impl ZeroNode {
+    pub(crate) fn new(m: usize) -> Self {
+        let capacity = m * 2;
+        ZeroNode(vec![INVALID; capacity])
+    }
+
     pub(crate) fn rewrite(&mut self, mut iter: impl Iterator<Item = PointId>) {
         for slot in self.0.iter_mut() {
             if let Some(pid) = iter.next() {
@@ -105,7 +109,8 @@ impl ZeroNode {
         }
 
         if self.0[idx].is_valid() {
-            let end = (DEFAULT_M * 2) - 1;
+            let m = self.0.capacity();
+            let end = m - 1;
             self.0.copy_within(idx..end, idx + 1);
         }
 
@@ -114,12 +119,6 @@ impl ZeroNode {
 
     pub(crate) fn set(&mut self, idx: usize, pid: PointId) {
         self.0[idx] = pid;
-    }
-}
-
-impl Default for ZeroNode {
-    fn default() -> ZeroNode {
-        ZeroNode([INVALID; DEFAULT_M * 2])
     }
 }
 

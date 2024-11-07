@@ -299,7 +299,7 @@ where
         let mut layers = vec![vec![]; top.0];
         let zero = points
             .iter()
-            .map(|_| RwLock::new(ZeroNode::default()))
+            .map(|_| RwLock::new(ZeroNode::new(builder.m)))
             .collect::<Vec<_>>();
 
         let state = Construction {
@@ -337,7 +337,7 @@ where
             if !layer.is_zero() {
                 (&state.zero[..end])
                     .into_par_iter()
-                    .map(|zero| UpperNode::from_zero(&zero.read()))
+                    .map(|zero| UpperNode::from_zero(&zero.read(), builder.m))
                     .collect_into_vec(&mut layers[layer.0 - 1]);
             }
         }
